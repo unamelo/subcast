@@ -1053,6 +1053,17 @@ $('usedir').onclick = function () {
 var epItems = [];
 var epRowEls = [];
 
+// scroll a row to the top of the episode list, so upcoming episodes read downward
+// and scrolling up reveals what was already watched
+function scrollRowTop(row) {
+  var box = $('episodes');
+  if (!row || !box) return;
+  box.scrollTo({
+    top: box.scrollTop + row.getBoundingClientRect().top - box.getBoundingClientRect().top,
+    behavior: 'smooth',
+  });
+}
+
 function playEpisodeAt(idx) {
   var it = epItems[idx];
   if (!it) { status('no more episodes in the list'); return; }
@@ -1061,7 +1072,7 @@ function playEpisodeAt(idx) {
     epRowEls.forEach(function (e) { e.classList.remove('active'); });
     if (epRowEls[idx]) {
       epRowEls[idx].classList.add('active');
-      epRowEls[idx].scrollIntoView({ block: 'nearest' });
+      scrollRowTop(epRowEls[idx]);
     }
     if (!castingLive()) status('Loaded — press Cast.');
   }).catch(function (e) { status('error: ' + e.message); });
@@ -1137,6 +1148,10 @@ function renderEpisodes(data) {
     epRowEls.push(div);
     box.appendChild(div);
   });
+  var ci = currentEpIndex();
+  if (ci >= 0 && epRowEls[ci]) {
+    requestAnimationFrame(function () { scrollRowTop(epRowEls[ci]); });
+  }
 }
 
 var enhTimer = null;
