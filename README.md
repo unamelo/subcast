@@ -2,6 +2,8 @@
 
 Cast local video with external subtitles (`.ass` / `.srt`) to a Chromecast, from a single-file, zero-dependency Node server — with a web UI for browsing folders, pairing episodes to subtitle files, and styling subtitles live on the TV.
 
+![subcast — episode library, cast controls, and live subtitle styling](screenshot.png)
+
 Born from a simple problem: Chromecast can't play local files with sidecar subtitles, tab-mirroring is laggy, and 178 episodes of *The Prince of Tennis* with bilingual fansubs deserve better.
 
 ## Features
