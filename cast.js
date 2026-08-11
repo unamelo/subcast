@@ -1353,14 +1353,33 @@ window.addEventListener('pagehide', function () {
 var syncOn = false, progSeek = false, progPlayPause = false;
 
 var lastUserSeek = 0;
+var pendingSeekTo = null;
+var pendingSeekAt = 0;
+
+// every seek we send goes through here, so the sync loop knows a seek is in
+// flight until the TV actually reports a position near the target
+function pushSeek(t) {
+  if (!player || !controller) return;
+  player.currentTime = t;
+  controller.seek();
+  pendingSeekTo = t;
+  pendingSeekAt = Date.now();
+  lastUserSeek = Date.now();
+  reportProgress(true);
+}
 
 function syncPreview() {
   if (!syncOn || !player || !player.duration) return;
   if (document.hidden) return; // background tab: Chrome throttles/pauses the muted preview — leave it alone
   var pv = $('preview');
-  // don't yank the preview back to the TV position while the user is scrubbing it
-  // (or just after — the TV needs a moment to complete the seek we sent)
-  if (Date.now() - lastUserSeek > 2500 && Math.abs(pv.currentTime - player.currentTime) > 1.5) {
+  if (pendingSeekTo !== null) {
+    if (Math.abs(player.currentTime - pendingSeekTo) < 3 || Date.now() - pendingSeekAt > 15000) {
+      pendingSeekTo = null; // TV arrived (or gave up) — resume normal syncing
+    }
+  }
+  // don't yank the preview back while the user is scrubbing or a seek is still in flight
+  if (pendingSeekTo === null && Date.now() - lastUserSeek > 2500 &&
+      Math.abs(pv.currentTime - player.currentTime) > 1.5) {
     progSeek = true;
     pv.currentTime = player.currentTime;
   }
@@ -1395,10 +1414,7 @@ $('preview').addEventListener('seeked', function () {
     // scrubbing fires many seeks — only push the final position to the TV
     clearTimeout(seekPushTimer);
     seekPushTimer = setTimeout(function () {
-      lastUserSeek = Date.now();
-      player.currentTime = $('preview').currentTime;
-      controller.seek();
-      reportProgress(true);
+      pushSeek($('preview').currentTime);
     }, 300);
   } else {
     reportProgress(true);
@@ -1470,6 +1486,7 @@ function castNow() {
     var req = new chrome.cast.media.LoadRequest(mediaInfo);
     req.currentTime = resume;
     lastCastVersion = loaded.version;
+    pendingSeekTo = null; // fresh load — no seek in flight
     if (loaded.sub) {
       // declare every language variant upfront so switching later is a track
       // activation (instant, safe) instead of a media reload (stacks cues)
@@ -1520,10 +1537,10 @@ $('stop').onclick = function () {
     function () { status('stopped'); },
     function (e) { status('stop failed: ' + JSON.stringify(e)); });
 };
-$('back').onclick = function () { if (player) { player.currentTime = Math.max(0, player.currentTime - 10); controller.seek(); reportProgress(true); } };
-$('fwd').onclick = function () { if (player) { player.currentTime += 10; controller.seek(); reportProgress(true); } };
+$('back').onclick = function () { if (player) pushSeek(Math.max(0, player.currentTime - 10)); };
+$('fwd').onclick = function () { if (player) pushSeek(player.currentTime + 10); };
 $('seek').oninput = function (e) {
-  if (player && player.duration) { player.currentTime = (e.target.value / 100) * player.duration; controller.seek(); reportProgress(true); }
+  if (player && player.duration) pushSeek((e.target.value / 100) * player.duration);
 };
 // after a page reload mid-cast the track ids are lost — recover them from the live media session
 function recoverTracks() {
