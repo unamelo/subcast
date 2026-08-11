@@ -1305,12 +1305,19 @@ function syncPreview() {
     pv.currentTime = player.currentTime;
   }
   var tvPlaying = !player.isPaused && player.playerState !== 'IDLE';
-  if (tvPlaying && pv.paused) { progPlayPause = true; pv.play().catch(function () { progPlayPause = false; }); }
-  else if (!tvPlaying && !pv.paused) { progPlayPause = true; pv.pause(); }
+  if (tvPlaying && pv.paused) {
+    pv.muted = true; // sync mode always mutes the preview — the TV carries the audio
+    progPlayPause = true;
+    pv.play().catch(function () { progPlayPause = false; });
+  } else if (!tvPlaying && !pv.paused) {
+    progPlayPause = true;
+    pv.pause();
+  }
 }
 
 $('syncpv').checked = localStorage.subcastSync === '1';
 syncOn = $('syncpv').checked;
+if (syncOn) $('preview').muted = true; // restored sync must re-apply the mute, or reload double-plays audio
 $('syncpv').onchange = function () {
   syncOn = this.checked;
   localStorage.subcastSync = syncOn ? '1' : '0';
