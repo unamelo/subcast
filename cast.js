@@ -1293,10 +1293,14 @@ window.addEventListener('pagehide', function () {
 // ---- preview <-> TV sync ----
 var syncOn = false, progSeek = false, progPlayPause = false;
 
+var lastUserSeek = 0;
+
 function syncPreview() {
   if (!syncOn || !player || !player.duration) return;
   var pv = $('preview');
-  if (Math.abs(pv.currentTime - player.currentTime) > 1.5) {
+  // don't yank the preview back to the TV position while the user is scrubbing it
+  // (or just after — the TV needs a moment to complete the seek we sent)
+  if (Date.now() - lastUserSeek > 2500 && Math.abs(pv.currentTime - player.currentTime) > 1.5) {
     progSeek = true;
     pv.currentTime = player.currentTime;
   }
@@ -1313,13 +1317,25 @@ $('syncpv').onchange = function () {
   if (syncOn) { $('preview').muted = true; syncPreview(); }
 };
 
+$('preview').addEventListener('seeking', function () {
+  if (!progSeek) lastUserSeek = Date.now();
+});
+var seekPushTimer = null;
 $('preview').addEventListener('seeked', function () {
   if (progSeek) { progSeek = false; return; }
+  lastUserSeek = Date.now();
   if (syncOn && player && player.duration && controller) {
-    player.currentTime = this.currentTime;
-    controller.seek();
+    // scrubbing fires many seeks — only push the final position to the TV
+    clearTimeout(seekPushTimer);
+    seekPushTimer = setTimeout(function () {
+      lastUserSeek = Date.now();
+      player.currentTime = $('preview').currentTime;
+      controller.seek();
+      reportProgress(true);
+    }, 300);
+  } else {
+    reportProgress(true);
   }
-  reportProgress(true);
 });
 $('preview').addEventListener('timeupdate', function () { reportProgress(false); });
 function fwdPlayState() {
