@@ -611,6 +611,17 @@ const PAGE = `<!DOCTYPE html>
   #epdir { color: var(--text); }
   #epcard { flex: 1; min-height: 0; display: none; flex-direction: column; border-top: 1px solid var(--pink-line); margin-top: .8rem; padding-top: .75rem; }
   #episodes { flex: 1; min-height: 120px; overflow-y: auto; border: 1px solid var(--pink-line); border-radius: 8px; background: var(--panel); }
+  #floatbar {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; z-index: 6;
+    display: none; align-items: center; gap: .4rem; padding: .45rem .75rem;
+    background: rgba(255,252,246,.93); backdrop-filter: blur(6px);
+    border: 1px solid var(--pink-line); border-radius: 999px;
+    box-shadow: 0 14px 36px -14px rgba(90,75,65,.4);
+  }
+  #floatbar.on { display: flex; }
+  #floatbar button { border-radius: 999px; padding: .34rem .8rem; }
+  #floatbar input[type=range] { flex: none; min-width: 70px; width: 84px; }
+  #fspeed { min-width: 3.4rem; }
   #castcard { display: none; position: relative; }
   #castcard.ready { display: block; animation: rise .5s var(--ease); }
   .cardleaf { position: absolute; left: -17px; top: 42%; width: 52px; transform: rotate(-96deg); pointer-events: none; }
@@ -896,6 +907,14 @@ const PAGE = `<!DOCTYPE html>
 </main>
 </div>
 
+<div id="floatbar">
+  <button id="fprev" title="previous episode">‹ prev</button>
+  <button id="fplay" title="play / pause">play ∕ pause</button>
+  <button id="fnext" title="next episode">next ›</button>
+  <button id="fspeed" title="playback speed">1×</button>
+  <label>vol <input type="range" id="fvol" min="0" max="1" step="0.05" value="1"></label>
+</div>
+
 <script>
 var ADVERTISE = %%ADVERTISE%%;
 var PORT = %%PORT%%;
@@ -1031,7 +1050,34 @@ $('usedir').onclick = function () {
   }).catch(function (e) { $('curpath').textContent = 'error: ' + e.message; });
 };
 
+var epItems = [];
+var epRowEls = [];
+
+function playEpisodeAt(idx) {
+  var it = epItems[idx];
+  if (!it) { status('no more episodes in the list'); return; }
+  status('loading episode…');
+  selectPair(it.video, it.sub, function () {
+    epRowEls.forEach(function (e) { e.classList.remove('active'); });
+    if (epRowEls[idx]) {
+      epRowEls[idx].classList.add('active');
+      epRowEls[idx].scrollIntoView({ block: 'nearest' });
+    }
+    if (!castingLive()) status('Loaded — press Cast.');
+  }).catch(function (e) { status('error: ' + e.message); });
+}
+
+function currentEpIndex() {
+  if (!loaded) return -1;
+  for (var i = 0; i < epItems.length; i++) {
+    if (epItems[i].name === loaded.video) return i;
+  }
+  return -1;
+}
+
 function renderEpisodes(data) {
+  epItems = data.items;
+  epRowEls = [];
   $('epcard').style.display = data.items.length ? 'flex' : 'none';
   function lastSeg(p) { return p.split('/').pop() || p; }
   $('epdir').textContent = data.videoPath === data.subPath
@@ -1041,7 +1087,7 @@ function renderEpisodes(data) {
   if (!data.items.length) { $('pickinfo').textContent = 'no videos found in that folder'; return; }
   var box = $('episodes');
   box.innerHTML = '';
-  data.items.forEach(function (it) {
+  data.items.forEach(function (it, idx) {
     var div = document.createElement('div');
     div.className = 'entry';
     div.innerHTML = '<span>·</span><span></span>' +
@@ -1087,14 +1133,8 @@ function renderEpisodes(data) {
       div.appendChild(eb);
     }
     if (loaded && loaded.video === it.name) div.classList.add('active');
-    div.onclick = function () {
-      status('loading episode…');
-      selectPair(it.video, it.sub, function () {
-        box.querySelectorAll('.entry').forEach(function (e) { e.classList.remove('active'); });
-        div.classList.add('active');
-        status('Loaded — press Cast.');
-      }).catch(function (e) { status('error: ' + e.message); });
-    };
+    div.onclick = function () { playEpisodeAt(idx); };
+    epRowEls.push(div);
     box.appendChild(div);
   });
 }
@@ -1150,6 +1190,7 @@ function applyState(j) {
   $('langwrap').style.display = j.bilingual ? '' : 'none';
   $('nowplaying').textContent = j.video ? j.video.replace(/\\.[^.]+$/, '') : '';
   $('castcard').classList.add('ready');
+  $('floatbar').classList.add('on');
   updatePreview();
 }
 
@@ -1236,6 +1277,9 @@ function initCast() {
   controller.addEventListener(cast.framework.RemotePlayerEventType.IS_PAUSED_CHANGED, function () {
     syncPreview();
     reportProgress(true); // save the exact spot on pause
+  });
+  controller.addEventListener(cast.framework.RemotePlayerEventType.VOLUME_LEVEL_CHANGED, function () {
+    if (castingLive()) $('fvol').value = player.volumeLevel;
   });
   status('Ready — pick a device with the cast icon, then press Cast.');
 }
@@ -1594,6 +1638,66 @@ $('sublang').onchange = function () {
     media.editTracksInfo(new chrome.cast.media.EditTracksInfoRequest([currentTrackId]),
       function () { status('subtitle track switched ✓'); },
       function (e) { status('switch failed: ' + JSON.stringify(e)); });
+  }
+};
+
+// ---- floating controller ----
+$('fprev').onclick = function () {
+  var i = currentEpIndex();
+  if (i < 0) { status('no episode list loaded'); return; }
+  playEpisodeAt(i - 1);
+};
+$('fnext').onclick = function () {
+  var i = currentEpIndex();
+  if (i < 0) { status('no episode list loaded'); return; }
+  playEpisodeAt(i + 1);
+};
+$('fplay').onclick = function () {
+  if (castingLive() && controller) { controller.playOrPause(); return; }
+  var pv = $('preview');
+  if (pv.paused) pv.play().catch(function () {}); else pv.pause();
+};
+
+var SPEEDS = [1, 1.25, 1.5, 2, 0.75];
+var speedIdx = 0;
+var rateReqId = 9000;
+$('fspeed').onclick = function () {
+  speedIdx = (speedIdx + 1) % SPEEDS.length;
+  var r = SPEEDS[speedIdx];
+  this.textContent = r + '×';
+  $('preview').playbackRate = r;
+  if (!castingLive()) { status('preview speed ' + r + '×'); return; }
+  var session = cast.framework.CastContext.getInstance().getCurrentSession();
+  var media = session.getMediaSession();
+  try {
+    if (typeof media.setPlaybackRate === 'function') {
+      media.setPlaybackRate(r,
+        function () { status('speed ' + r + '×'); },
+        function () { status('TV rejected speed change — preview only'); });
+    } else {
+      // older sender lib: talk to the receiver's media channel directly
+      session.sendMessage('urn:x-cast:com.google.cast.media', {
+        type: 'SET_PLAYBACK_RATE',
+        mediaSessionId: media.mediaSessionId,
+        requestId: rateReqId++,
+        playbackRate: r,
+      });
+      status('speed ' + r + '×');
+    }
+  } catch (e) {
+    status('speed not supported by this TV — preview only');
+  }
+};
+
+$('fvol').oninput = function () {
+  var v = parseFloat(this.value);
+  if (castingLive() && controller) {
+    player.volumeLevel = v;
+    controller.setVolumeLevel();
+  } else {
+    var pv = $('preview');
+    pv.volume = v;
+    if (v > 0 && !syncOn) pv.muted = false;
   }
 };
 
