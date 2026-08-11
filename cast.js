@@ -1356,6 +1356,7 @@ var lastUserSeek = 0;
 
 function syncPreview() {
   if (!syncOn || !player || !player.duration) return;
+  if (document.hidden) return; // background tab: Chrome throttles/pauses the muted preview — leave it alone
   var pv = $('preview');
   // don't yank the preview back to the TV position while the user is scrubbing it
   // (or just after — the TV needs a moment to complete the seek we sent)
@@ -1407,10 +1408,16 @@ $('preview').addEventListener('timeupdate', function () { reportProgress(false);
 function fwdPlayState() {
   if ($('preview').paused) reportProgress(true); // save the exact spot when preview pauses
   if (progPlayPause) { progPlayPause = false; return; }
+  // Chrome auto-pauses muted background video on tab switch — that is not the
+  // user pausing, so never forward it to the TV
+  if (document.hidden) return;
   if (syncOn && controller && player && player.duration && player.isPaused !== $('preview').paused) {
     controller.playOrPause();
   }
 }
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden) syncPreview(); // tab back in focus: re-sync the preview to the TV
+});
 $('preview').addEventListener('play', fwdPlayState);
 $('preview').addEventListener('pause', fwdPlayState);
 
