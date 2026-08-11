@@ -1316,6 +1316,18 @@ function initCast() {
     receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
     autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED,
   });
+  // the Default Media Receiver closes itself after ~5 min of idle — say so
+  // instead of letting the buttons silently stop working
+  ctx.addEventListener(cast.framework.CastContextEventType.SESSION_STATE_CHANGED, function (e) {
+    var S = cast.framework.SessionState;
+    if (e.sessionState === S.SESSION_ENDED) {
+      currentTracks = null;
+      currentTrackId = null;
+      status('TV session ended (the receiver idles out after ~5 min of nothing playing) — click the cast icon to reconnect');
+    } else if (e.sessionState === S.SESSION_STARTED || e.sessionState === S.SESSION_RESUMED) {
+      status('Connected — press Cast to play' + (loaded && loaded.video ? ' “' + loaded.video + '”' : '') + '.');
+    }
+  });
   player = new cast.framework.RemotePlayer();
   controller = new cast.framework.RemotePlayerController(player);
   controller.addEventListener(cast.framework.RemotePlayerEventType.CURRENT_TIME_CHANGED, updateSeek);
