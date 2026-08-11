@@ -913,6 +913,7 @@ const PAGE = `<!DOCTYPE html>
   <button id="fnext" title="next episode">next ›</button>
   <button id="fspeed" title="playback speed">1×</button>
   <label>vol <input type="range" id="fvol" min="0" max="1" step="0.05" value="1"></label>
+  <label title="when an episode ends, cast the next one automatically"><input type="checkbox" id="fauto"> auto</label>
 </div>
 
 <script>
@@ -1064,7 +1065,7 @@ function scrollRowTop(row) {
   });
 }
 
-function playEpisodeAt(idx) {
+function playEpisodeAt(idx, thenCast) {
   var it = epItems[idx];
   if (!it) { status('no more episodes in the list'); return; }
   status('loading episode…');
@@ -1074,7 +1075,8 @@ function playEpisodeAt(idx) {
       epRowEls[idx].classList.add('active');
       scrollRowTop(epRowEls[idx]);
     }
-    if (!castingLive()) status('Loaded — press Cast.');
+    if (thenCast && !castingLive()) castNow(); // auto-advance: the old media just ended, start the new one
+    else if (!castingLive()) status('Loaded — press Cast.');
   }).catch(function (e) { status('error: ' + e.message); });
 }
 
@@ -1296,6 +1298,7 @@ function initCast() {
   controller.addEventListener(cast.framework.RemotePlayerEventType.VOLUME_LEVEL_CHANGED, function () {
     if (castingLive()) $('fvol').value = player.volumeLevel;
   });
+  controller.addEventListener(cast.framework.RemotePlayerEventType.PLAYER_STATE_CHANGED, maybeAutoNext);
   status('Ready — pick a device with the cast icon, then press Cast.');
 }
 
@@ -1305,6 +1308,30 @@ function fmt(s) {
   return (h ? h + ':' + String(m % 60).padStart(2, '0') : m) + ':' + String(s % 60).padStart(2, '0');
 }
 var lastProgressSent = 0;
+var lastKnownT = 0;
+var lastKnownD = 0;
+var advancedForSeq = -1;
+
+// natural end of an episode → cast the next one (auto toggle on the floating bar)
+function maybeAutoNext() {
+  if (!player || player.playerState !== 'IDLE') return;
+  if (!$('fauto').checked) return;
+  if (advancedForSeq === castSeq) return; // once per cast
+  var finished = false;
+  try {
+    var s = cast.framework.CastContext.getInstance().getCurrentSession();
+    var m = s && s.getMediaSession();
+    if (m && m.idleReason === 'FINISHED') finished = true;
+  } catch (e) { /* session gone */ }
+  // fallback signal: we last saw the playhead at the very end
+  if (!finished && lastKnownD > 0 && lastKnownT / lastKnownD > 0.95) finished = true;
+  if (!finished) return;
+  var i = currentEpIndex();
+  if (i < 0 || !epItems[i + 1]) { status('episode finished — end of list'); return; }
+  advancedForSeq = castSeq;
+  status('episode finished — playing the next one…');
+  playEpisodeAt(i + 1, true);
+}
 
 function castActive() {
   try {
@@ -1335,6 +1362,8 @@ function reportProgress(force) {
 
 function updateSeek() {
   if (!player || !player.duration) return;
+  lastKnownT = player.currentTime;
+  lastKnownD = player.duration;
   $('seek').value = (player.currentTime / player.duration) * 100;
   $('time').textContent = fmt(player.currentTime) + ' / ' + fmt(player.duration);
   syncPreview();
@@ -1727,6 +1756,9 @@ $('fspeed').onclick = function () {
     status('speed not supported by this TV — preview only');
   }
 };
+
+$('fauto').checked = localStorage.subcastAuto === '1';
+$('fauto').onchange = function () { localStorage.subcastAuto = this.checked ? '1' : '0'; };
 
 $('fvol').oninput = function () {
   var v = parseFloat(this.value);
