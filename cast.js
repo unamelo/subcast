@@ -384,6 +384,35 @@ function enhanceNext() {
   });
 }
 
+// ---------- keep Windows awake while streaming ----------
+// A muted preview tab does not hold a wake lock, so an idle-sleep timer would
+// kill the server mid-episode. While the Chromecast is actively pulling video
+// (or the page reports progress), a short-lived PowerShell holder asserts
+// ES_CONTINUOUS|ES_SYSTEM_REQUIRED for 150s at a time — screen may still turn
+// off, and if the server dies the hold expires on its own.
+const AWAKE_PS = 'Add-Type -Name PW -Namespace W32 -MemberDefinition ' +
+  '\'[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);\'; ' +
+  '[W32.PW]::SetThreadExecutionState(2147483649) | Out-Null; Start-Sleep -Seconds 150';
+let awakeProc = null;
+let lastPoke = 0;
+let awakeLogged = false;
+
+function pokeAwake() {
+  const now = Date.now();
+  if (now - lastPoke < 30000) return;
+  lastPoke = now;
+  if (awakeProc) return;
+  try {
+    awakeProc = spawn('powershell.exe', ['-NoProfile', '-Command', AWAKE_PS], { stdio: 'ignore' });
+    awakeProc.on('error', () => { awakeProc = null; });
+    awakeProc.on('exit', () => { awakeProc = null; });
+    if (!awakeLogged) {
+      awakeLogged = true;
+      console.log('keep-awake: holding Windows awake while streaming (releases ~3 min after playback stops)');
+    }
+  } catch { awakeProc = null; }
+}
+
 // ---------- network detection ----------
 function isWsl() {
   try { return /microsoft/i.test(fs.readFileSync('/proc/version', 'utf8')); } catch { return false; }
@@ -1871,6 +1900,7 @@ const server = http.createServer((req, res) => {
         try {
           const { t, d } = JSON.parse(body);
           if (!state.videoPath || !(t >= 0)) { json(res, 200, { ok: false }); return; }
+          pokeAwake();
           const key = path.basename(state.videoPath);
           if (d > 0 && t / d > 0.95) {
             delete prefs.positions[key];
@@ -1957,6 +1987,7 @@ const server = http.createServer((req, res) => {
 
   } else if (url === '/video') {
     if (!state.videoPath) { res.writeHead(404, cors); res.end('no video loaded'); return; }
+    pokeAwake();
     const range = req.headers.range;
     if (range) {
       const m = range.match(/bytes=(\d*)-(\d*)/);
@@ -1976,7 +2007,9 @@ const server = http.createServer((req, res) => {
         ...cors,
       });
       if (req.method === 'HEAD') { res.end(); return; }
-      fs.createReadStream(state.videoPath, { start, end }).pipe(res);
+      const rs = fs.createReadStream(state.videoPath, { start, end });
+      rs.on('data', pokeAwake); // long-lived streams keep poking while bytes flow
+      rs.pipe(res);
     } else {
       res.writeHead(200, {
         'Content-Type': state.videoMime,
@@ -1985,7 +2018,9 @@ const server = http.createServer((req, res) => {
         ...cors,
       });
       if (req.method === 'HEAD') { res.end(); return; }
-      fs.createReadStream(state.videoPath).pipe(res);
+      const rs2 = fs.createReadStream(state.videoPath);
+      rs2.on('data', pokeAwake);
+      rs2.pipe(res);
     }
 
   } else {
