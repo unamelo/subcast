@@ -1104,8 +1104,21 @@ function playEpisodeAt(idx, thenCast) {
       epRowEls[idx].classList.add('active');
       scrollRowTop(epRowEls[idx]);
     }
-    if (thenCast && !castingLive()) castNow(); // auto-advance: the old media just ended, start the new one
-    else if (!castingLive()) status('Loaded — press Cast.');
+    if (thenCast && !castingLive()) {
+      // the receiver is mid-transition right after FINISHED — give it a beat,
+      // then verify the load took and retry once if it didn't
+      setTimeout(function () {
+        try { castNow(); } catch (e) { status('auto-next failed: ' + e.message); return; }
+        setTimeout(function () {
+          if (!castingLive()) {
+            status('auto-next: retrying…');
+            try { castNow(); } catch (e) { status('auto-next failed: ' + e.message); }
+          }
+        }, 4000);
+      }, 800);
+    } else if (!castingLive()) {
+      status('Loaded — press Cast.');
+    }
   }).catch(function (e) { status('error: ' + e.message); });
 }
 
