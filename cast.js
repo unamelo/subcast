@@ -451,7 +451,7 @@ if (!state.videoPath && prefs.lastVideo) {
 // ---------- UI page ----------
 const PAGE = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>subcast</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-26 -26 52 52'%3E%3Cg%3E%3Cellipse rx='9' ry='17' cy='-15' fill='%23F0D2CA'/%3E%3Cellipse rx='9' ry='17' cy='-15' fill='%23F0D2CA' transform='rotate(72)'/%3E%3Cellipse rx='9' ry='17' cy='-15' fill='%23EBC7BE' transform='rotate(144)'/%3E%3Cellipse rx='9' ry='17' cy='-15' fill='%23EBC7BE' transform='rotate(216)'/%3E%3Cellipse rx='9' ry='17' cy='-15' fill='%23F0D2CA' transform='rotate(288)'/%3E%3Ccircle r='7.5' fill='%239B98C2'/%3E%3Ccircle r='2.6' fill='%237B78A8'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-40 -40 80 80'%3E%3Cg%3E%3Cellipse rx='9' ry='17' cy='-15' fill='%23F0D2CA'/%3E%3Cellipse rx='9' ry='17' cy='-15' fill='%23F0D2CA' transform='rotate(72)'/%3E%3Cellipse rx='9' ry='17' cy='-15' fill='%23EBC7BE' transform='rotate(144)'/%3E%3Cellipse rx='9' ry='17' cy='-15' fill='%23EBC7BE' transform='rotate(216)'/%3E%3Cellipse rx='9' ry='17' cy='-15' fill='%23F0D2CA' transform='rotate(288)'/%3E%3Ccircle r='7.5' fill='%239B98C2'/%3E%3Ccircle r='2.6' fill='%237B78A8'/%3E%3C/g%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500;1,600&family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet">
