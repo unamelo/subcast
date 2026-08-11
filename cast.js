@@ -919,6 +919,14 @@ function api(url) {
   });
 }
 
+function castingLive() {
+  try {
+    var s = cast.framework.CastContext.getInstance().getCurrentSession();
+    var m = s && s.getMediaSession();
+    return Boolean(m && m.playerState !== chrome.cast.media.PlayerState.IDLE);
+  } catch (e) { return false; }
+}
+
 function selectPair(video, sub, onDone) {
   return fetch('/api/select', {
     method: 'POST',
@@ -928,6 +936,7 @@ function selectPair(video, sub, onDone) {
     if (j.error) throw new Error(j.error);
     applyState(j);
     if (onDone) onDone(j);
+    if (castingLive()) castNow(); // already casting: swap the TV to the new episode immediately
     return j;
   });
 }
