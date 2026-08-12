@@ -395,6 +395,13 @@ function enhanceNext() {
 // system hold (0x80000001) is used — pair it with a one-time
 //   powercfg /change standby-timeout-ac 0
 // so screen-off doesn't drift into standby.
+// diagnostic trail (~/.subcast.log): correlate stream stops with Windows
+// kernel-power events instead of guessing
+const DLOG = path.join(os.homedir(), '.subcast.log');
+function dlog(msg) {
+  try { fs.appendFileSync(DLOG, `${new Date().toISOString()} ${msg}\n`); } catch { /* best effort */ }
+}
+
 const AWAKE_FLAGS = () => (flags.screenOff ? '2147483649' : '2147483651');
 const AWAKE_PS = () => 'Add-Type -Name PW -Namespace W32 -MemberDefinition ' +
   '\'[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);\'; ' +
@@ -410,8 +417,9 @@ function pokeAwake() {
   if (awakeProc) return;
   try {
     awakeProc = spawn('powershell.exe', ['-NoProfile', '-Command', AWAKE_PS()], { stdio: 'ignore' });
-    awakeProc.on('error', () => { awakeProc = null; });
-    awakeProc.on('exit', () => { awakeProc = null; });
+    dlog(`awake-hold spawned (${flags.screenOff ? 'system-only' : 'display+system'})`);
+    awakeProc.on('error', () => { awakeProc = null; dlog('awake-hold SPAWN ERROR'); });
+    awakeProc.on('exit', (code) => { awakeProc = null; dlog(`awake-hold exit (${code})`); });
     if (!awakeLogged) {
       awakeLogged = true;
       console.log(flags.screenOff
@@ -2021,6 +2029,7 @@ const server = http.createServer((req, res) => {
   } else if (url === '/video') {
     if (!state.videoPath) { res.writeHead(404, cors); res.end('no video loaded'); return; }
     pokeAwake();
+    dlog(`video request ${req.headers.range || '(full)'} from ${req.socket.remoteAddress}`);
     const range = req.headers.range;
     if (range) {
       const m = range.match(/bytes=(\d*)-(\d*)/);
@@ -2062,7 +2071,15 @@ const server = http.createServer((req, res) => {
   }
 });
 
+// heartbeat while actively streaming — a gap in these lines marks exactly when
+// the server (or the machine under it) stopped
+setInterval(() => {
+  if (Date.now() - lastPoke < 70000) dlog('streaming heartbeat');
+}, 60000);
+process.on('uncaughtException', (e) => { dlog(`UNCAUGHT: ${e.stack || e}`); console.error(e); });
+
 server.listen(PORT, '0.0.0.0', () => {
+  dlog(`server start pid=${process.pid} port=${PORT} advertise=${advertise} screenOff=${Boolean(flags.screenOff)}`);
   console.log('subcast running:');
   if (state.videoPath) {
     console.log(`  video:    ${state.videoPath} (${(state.videoSize / 1e6).toFixed(1)} MB)`);
