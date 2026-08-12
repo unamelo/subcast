@@ -22,6 +22,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (argv[i] === '--advertise') flags.advertise = argv[++i];
   else if (argv[i] === '--dump-vtt') flags.dumpVtt = true;
   else if (argv[i] === '--enhance') flags.enhance = true;
+  else if (argv[i] === '--screen-off') flags.screenOff = true;
   else positional.push(argv[i]);
 }
 const PORT = flags.port || 8080;
@@ -387,12 +388,17 @@ function enhanceNext() {
 // ---------- keep Windows awake while streaming ----------
 // A muted preview tab does not hold a wake lock, so an idle-sleep timer would
 // kill the server mid-episode. While the Chromecast is actively pulling video
-// (or the page reports progress), a short-lived PowerShell holder asserts
-// ES_CONTINUOUS|ES_SYSTEM_REQUIRED for 150s at a time — screen may still turn
-// off, and if the server dies the hold expires on its own.
-const AWAKE_PS = 'Add-Type -Name PW -Namespace W32 -MemberDefinition ' +
+// (or the page reports progress), a short-lived PowerShell holder asserts an
+// execution state for 150s at a time; if the server dies the hold expires alone.
+// Default holds DISPLAY too (0x80000003): on Modern Standby laptops the system
+// hold alone is ignored once the screen turns off. With --screen-off only the
+// system hold (0x80000001) is used — pair it with a one-time
+//   powercfg /change standby-timeout-ac 0
+// so screen-off doesn't drift into standby.
+const AWAKE_FLAGS = () => (flags.screenOff ? '2147483649' : '2147483651');
+const AWAKE_PS = () => 'Add-Type -Name PW -Namespace W32 -MemberDefinition ' +
   '\'[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);\'; ' +
-  '[W32.PW]::SetThreadExecutionState(2147483649) | Out-Null; Start-Sleep -Seconds 150';
+  `[W32.PW]::SetThreadExecutionState(${AWAKE_FLAGS()}) | Out-Null; Start-Sleep -Seconds 150`;
 let awakeProc = null;
 let lastPoke = 0;
 let awakeLogged = false;
@@ -403,12 +409,14 @@ function pokeAwake() {
   lastPoke = now;
   if (awakeProc) return;
   try {
-    awakeProc = spawn('powershell.exe', ['-NoProfile', '-Command', AWAKE_PS], { stdio: 'ignore' });
+    awakeProc = spawn('powershell.exe', ['-NoProfile', '-Command', AWAKE_PS()], { stdio: 'ignore' });
     awakeProc.on('error', () => { awakeProc = null; });
     awakeProc.on('exit', () => { awakeProc = null; });
     if (!awakeLogged) {
       awakeLogged = true;
-      console.log('keep-awake: holding Windows awake while streaming (releases ~3 min after playback stops)');
+      console.log(flags.screenOff
+        ? 'keep-awake: system hold only (--screen-off) — make sure plugged-in sleep is set to Never'
+        : 'keep-awake: holding display + system while streaming (Modern Standby ignores system-only holds)');
     }
   } catch { awakeProc = null; }
 }
