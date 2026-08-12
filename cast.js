@@ -399,34 +399,40 @@ function enhanceNext() {
 // kernel-power events instead of guessing
 const DLOG = path.join(os.homedir(), '.subcast.log');
 function dlog(msg) {
-  try { fs.appendFileSync(DLOG, `${new Date().toISOString()} ${msg}\n`); } catch { /* best effort */ }
+  try { fs.appendFile(DLOG, `${new Date().toISOString()} ${msg}\n`, () => {}); } catch { /* best effort */ }
 }
 
 const AWAKE_FLAGS = () => (flags.screenOff ? '2147483649' : '2147483651');
+// ONE long-lived holder per viewing session: ES_CONTINUOUS persists for the
+// life of the process, which then just blocks on stdin — if this server dies
+// for any reason, stdin closes and the hold releases itself. (The previous
+// design respawned PowerShell every 150s, recompiling a C# shim each time —
+// a CPU burst that caused visible playback hiccups.)
 const AWAKE_PS = () => 'Add-Type -Name PW -Namespace W32 -MemberDefinition ' +
   '\'[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);\'; ' +
-  `[W32.PW]::SetThreadExecutionState(${AWAKE_FLAGS()}) | Out-Null; Start-Sleep -Seconds 150`;
+  `[W32.PW]::SetThreadExecutionState(${AWAKE_FLAGS()}) | Out-Null; [void][Console]::In.ReadToEnd()`;
 let awakeProc = null;
 let lastPoke = 0;
-let awakeLogged = false;
 
 function pokeAwake() {
-  const now = Date.now();
-  if (now - lastPoke < 30000) return;
-  lastPoke = now;
+  lastPoke = Date.now();
   if (awakeProc) return;
   try {
-    awakeProc = spawn('powershell.exe', ['-NoProfile', '-Command', AWAKE_PS()], { stdio: 'ignore' });
+    awakeProc = spawn('powershell.exe', ['-NoProfile', '-Command', AWAKE_PS()], { stdio: ['pipe', 'ignore', 'ignore'] });
     dlog(`awake-hold spawned (${flags.screenOff ? 'system-only' : 'display+system'})`);
+    console.log(flags.screenOff
+      ? 'keep-awake: system hold only (--screen-off) — make sure plugged-in sleep is set to Never'
+      : 'keep-awake: holding display + system while streaming');
     awakeProc.on('error', () => { awakeProc = null; dlog('awake-hold SPAWN ERROR'); });
     awakeProc.on('exit', (code) => { awakeProc = null; dlog(`awake-hold exit (${code})`); });
-    if (!awakeLogged) {
-      awakeLogged = true;
-      console.log(flags.screenOff
-        ? 'keep-awake: system hold only (--screen-off) — make sure plugged-in sleep is set to Never'
-        : 'keep-awake: holding display + system while streaming (Modern Standby ignores system-only holds)');
-    }
   } catch { awakeProc = null; }
+}
+
+function releaseAwake() {
+  if (!awakeProc) return;
+  dlog('awake-hold release (idle)');
+  try { awakeProc.stdin.end(); } catch { /* already gone */ }
+  try { awakeProc.kill(); } catch { /* already gone */ }
 }
 
 // ---------- network detection ----------
@@ -2072,9 +2078,12 @@ const server = http.createServer((req, res) => {
 });
 
 // heartbeat while actively streaming — a gap in these lines marks exactly when
-// the server (or the machine under it) stopped
+// the server (or the machine under it) stopped. Also releases the wake hold
+// after ~3 minutes without streaming activity.
 setInterval(() => {
-  if (Date.now() - lastPoke < 70000) dlog('streaming heartbeat');
+  const idleMs = Date.now() - lastPoke;
+  if (idleMs < 70000) dlog('streaming heartbeat');
+  if (awakeProc && idleMs > 180000) releaseAwake();
 }, 60000);
 process.on('uncaughtException', (e) => { dlog(`UNCAUGHT: ${e.stack || e}`); console.error(e); });
 
