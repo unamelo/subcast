@@ -990,6 +990,14 @@ function api(url) {
   });
 }
 
+function clog(m) {
+  try {
+    fetch('/api/clientlog', {
+      method: 'POST', headers: { 'Content-Type': 'text/plain', 'X-Subcast-Key': KEY }, body: m,
+    }).catch(function () {});
+  } catch (e) { /* logging must never break playback */ }
+}
+
 function castingLive() {
   try {
     var s = cast.framework.CastContext.getInstance().getCurrentSession();
@@ -1127,17 +1135,13 @@ function playEpisodeAt(idx, thenCast) {
       scrollRowTop(epRowEls[idx]);
     }
     if (thenCast && !castingLive()) {
-      // the receiver is mid-transition right after FINISHED — give it a beat,
-      // then verify the load took and retry once if it didn't
+      // hidden tabs get intensive timer throttling, so a fixed retry chain is
+      // unreliable — arm the watchdog, which keeps attempting until the TV plays
+      autoNextTries = 5;
+      clog('auto-next: loaded "' + it.name + '", arming cast watchdog');
       setTimeout(function () {
-        try { castNow(); } catch (e) { status('auto-next failed: ' + e.message); return; }
-        setTimeout(function () {
-          if (!castingLive()) {
-            status('auto-next: retrying…');
-            try { castNow(); } catch (e) { status('auto-next failed: ' + e.message); }
-          }
-        }, 4000);
-      }, 800);
+        try { castNow(); } catch (e) { clog('auto-next castNow threw: ' + e.message); }
+      }, 700);
     } else if (!castingLive()) {
       status('Loaded — press Cast.');
     }
@@ -1355,6 +1359,7 @@ function initCast() {
   // instead of letting the buttons silently stop working
   ctx.addEventListener(cast.framework.CastContextEventType.SESSION_STATE_CHANGED, function (e) {
     var S = cast.framework.SessionState;
+    clog('session state: ' + e.sessionState);
     if (e.sessionState === S.SESSION_ENDED) {
       currentTracks = null;
       currentTrackId = null;
@@ -1387,6 +1392,22 @@ var lastProgressSent = 0;
 var lastKnownT = 0;
 var lastKnownD = 0;
 var advancedForSeq = -1;
+var autoNextTries = 0;
+
+// survives tab throttling: keeps trying to start the cast until the TV
+// actually reports playback (or attempts run out)
+setInterval(function () {
+  if (autoNextTries <= 0) return;
+  if (castingLive()) {
+    autoNextTries = 0;
+    clog('auto-next: confirmed playing on TV');
+    return;
+  }
+  autoNextTries--;
+  clog('auto-next: watchdog retry (' + autoNextTries + ' left)');
+  status('auto-next: retrying cast…');
+  try { castNow(); } catch (e) { clog('auto-next castNow threw: ' + e.message); }
+}, 8000);
 
 // natural end of an episode → cast the next one (auto toggle on the floating bar)
 function maybeAutoNext() {
@@ -1405,6 +1426,7 @@ function maybeAutoNext() {
   var i = currentEpIndex();
   if (i < 0 || !epItems[i + 1]) { status('episode finished — end of list'); return; }
   advancedForSeq = castSeq;
+  clog('auto-next: episode finished (idx ' + i + '), advancing');
   status('episode finished — playing the next one…');
   playEpisodeAt(i + 1, true);
 }
@@ -1558,7 +1580,13 @@ var lastCastVersion = null;
 function castNow() {
   if (!loaded) return;
   var session = cast.framework.CastContext.getInstance().getCurrentSession();
-  if (!session) { status('No device connected — click the Cast icon (top right) first.'); return; }
+  if (!session) {
+    clog('castNow: NO SESSION (state=' + cast.framework.CastContext.getInstance().getSessionState() + ')');
+    status('No device connected — click the Cast icon (top right) first.');
+    return;
+  }
+  var m0 = session.getMediaSession();
+  clog('castNow: session ok, media=' + (m0 ? m0.playerState + '/' + (m0.idleReason || '-') : 'none'));
   // re-casting the same episode (seek recovery, language switch) resumes near where it was
   var resume = 0;
   if (lastCastVersion === loaded.version && player && player.currentTime > 5) {
@@ -1619,10 +1647,14 @@ function castNow() {
     }
     session.loadMedia(req).then(
       function () {
+        clog('loadMedia OK: ' + loaded.video + ' resume=' + Math.round(resume));
         status((loaded.sub ? 'Casting with subtitles ✓' : 'Casting, no subtitle ✓') +
           (resume > 0 ? ' — resumed at ' + fmt(resume) : ''));
       },
-      function (e) { status('Load failed: ' + JSON.stringify(e)); }
+      function (e) {
+        clog('loadMedia FAILED: ' + JSON.stringify(e));
+        status('Load failed: ' + JSON.stringify(e));
+      }
     );
   }
 };
@@ -1987,6 +2019,11 @@ const server = http.createServer((req, res) => {
         done: enhance.done,
         failed: enhance.failed,
       });
+
+    } else if (url === '/api/clientlog' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c) => { body += c; if (body.length > 4096) req.destroy(); });
+      req.on('end', () => { dlog(`client: ${body.slice(0, 500)}`); json(res, 200, { ok: true }); });
 
     } else if (url === '/api/mpv' && req.method === 'POST') {
       if (!state.videoPath) { json(res, 400, { error: 'no video loaded' }); return; }
