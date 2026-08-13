@@ -1303,6 +1303,10 @@ function updatePreview() {
     if (loaded.position > 15) pv.currentTime = loaded.position;
     hookPreviewTrack();
     updateCueCss();
+    if (autoPlayPreview) {
+      autoPlayPreview = false;
+      pv.play().catch(function () { status('next episode ready — press play (browser blocked autoplay)'); });
+    }
   });
 }
 
@@ -1548,6 +1552,26 @@ $('preview').addEventListener('seeked', function () {
   }
 });
 $('preview').addEventListener('timeupdate', function () { reportProgress(false); });
+
+// auto-next for browser-player watching — the cast path has its own handler
+var autoPlayPreview = false;
+$('preview').addEventListener('ended', function () {
+  var pv = this;
+  if (loaded && pv.duration) {
+    // mark this episode watched by name, so it can't race the upcoming select
+    fetch('/api/progress', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Subcast-Key': KEY },
+      body: JSON.stringify({ t: pv.duration, d: pv.duration, name: loaded.video }),
+    }).catch(function () {});
+  }
+  if (!$('fauto').checked || castingLive()) return;
+  var i = currentEpIndex();
+  if (i < 0 || !epItems[i + 1]) { status('episode finished — end of list'); return; }
+  clog('auto-next(preview): advancing');
+  status('episode finished — playing the next one…');
+  autoPlayPreview = true;
+  playEpisodeAt(i + 1);
+});
 function fwdPlayState() {
   if ($('preview').paused) reportProgress(true); // save the exact spot when preview pauses
   if (progPlayPause) { progPlayPause = false; return; }
@@ -1977,10 +2001,11 @@ const server = http.createServer((req, res) => {
       req.on('data', (c) => { body += c; if (body.length > 1e5) req.destroy(); });
       req.on('end', () => {
         try {
-          const { t, d } = JSON.parse(body);
+          const { t, d, name } = JSON.parse(body);
           if (!state.videoPath || !(t >= 0)) { json(res, 200, { ok: false }); return; }
           pokeAwake();
-          const key = path.basename(state.videoPath);
+          // explicit name wins: end-of-episode reports can race the next /api/select
+          const key = (typeof name === 'string' && name) ? name : path.basename(state.videoPath);
           if (d > 0 && t / d > 0.95) {
             delete prefs.positions[key];
             prefs.watched[key] = true;
