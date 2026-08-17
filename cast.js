@@ -1699,13 +1699,19 @@ function buildQueueItem(idx, base, first, resume) {
 }
 
 function doQueueLoad(i0, resume, base, session) {
-  var end = Math.min(epItems.length, i0 + 50);
-  var items = [];
-  for (var idx = i0; idx < end; idx++) items.push(buildQueueItem(idx, base, idx === i0, resume));
-  var req = new chrome.cast.media.QueueLoadRequest(items);
+  // the cast channel caps messages at 64KB — load a small first slice, then
+  // append the rest in chunks via queueInsertItems
+  var CHUNK = 10;
+  var TOTAL_CAP = 60;
+  var end = Math.min(epItems.length, i0 + TOTAL_CAP);
+  var first = [];
+  for (var idx = i0; idx < Math.min(i0 + CHUNK, end); idx++) {
+    first.push(buildQueueItem(idx, base, idx === i0, resume));
+  }
+  var req = new chrome.cast.media.QueueLoadRequest(first);
   req.startIndex = 0;
-  clog('queueLoad: ' + items.length + ' items from idx ' + i0 + (resume > 0 ? ' resume=' + Math.round(resume) : '') +
-    (end < epItems.length ? ' (list capped at 50)' : ''));
+  clog('queueLoad: first ' + first.length + ' of ' + (end - i0) + ' items from idx ' + i0 +
+    (resume > 0 ? ' resume=' + Math.round(resume) : '') + ', ~' + JSON.stringify(first).length + 'B');
   session.getSessionObj().queueLoad(req,
     function () {
       queueActive = true;
@@ -1714,14 +1720,28 @@ function doQueueLoad(i0, resume, base, session) {
       subsOn = true;
       $('subs').textContent = 'Subs: on';
       clog('queueLoad OK');
-      status('Casting ✓ — the TV will auto-play ' + (items.length - 1) + ' more episode' + (items.length === 2 ? '' : 's') +
+      status('Casting ✓ — the TV will auto-play ' + (end - i0 - 1) + ' more episode' + (end - i0 === 2 ? '' : 's') +
         (resume > 0 ? ' (resumed at ' + fmt(resume) + ')' : ''));
+      appendRest(i0 + CHUNK);
     },
     function (e) {
       queueActive = false;
       clog('queueLoad FAILED: ' + JSON.stringify(e));
       status('Queue load failed: ' + JSON.stringify(e));
     });
+
+  function appendRest(from) {
+    if (from >= end) { clog('queue complete: ' + (end - i0) + ' items queued'); return; }
+    var media = session.getMediaSession();
+    if (!media) { clog('queue append aborted at ' + from + ': no media session'); return; }
+    var chunk = [];
+    for (var idx = from; idx < Math.min(from + CHUNK, end); idx++) {
+      chunk.push(buildQueueItem(idx, base, false, 0));
+    }
+    media.queueInsertItems(new chrome.cast.media.QueueInsertItemsRequest(chunk),
+      function () { appendRest(from + CHUNK); },
+      function (e) { clog('queue append failed at ' + from + ': ' + JSON.stringify(e)); });
+  }
 }
 
 function castNow() {
