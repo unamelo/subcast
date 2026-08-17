@@ -1577,7 +1577,9 @@ function syncPreview() {
     pv.muted = true; // sync mode always mutes the preview — the TV carries the audio
     progPlayPause = true;
     pv.play().catch(function () { progPlayPause = false; });
-  } else if (!tvPlaying && !pv.paused) {
+  } else if (!tvPlaying && !pv.paused && player.isMediaLoaded && player.isPaused) {
+    // mirror only a real TV pause — never idle gaps between queue items, and
+    // never fight a user who is deliberately playing the preview
     clog('sync: pausing preview (tv=' + st + ' isPaused=' + player.isPaused + ')');
     progPlayPause = true;
     pv.pause();
@@ -1692,7 +1694,10 @@ function buildQueueItem(idx, base, first, resume) {
   }
   qi = new chrome.cast.media.QueueItem(mi);
   if (it.sub) qi.activeTrackIds = [{ zh: 1, ja: 2, all: 3 }[queueLang()]];
-  qi.autoplay = first ? true : $('fauto').checked;
+  // always autoplay — a non-autoplay queue item parks the receiver in IDLE
+  // where play/pause commands are dead. The auto toggle decides whether we
+  // queue at all (see doLoad), not whether queued items play.
+  qi.autoplay = true;
   qi.preloadTime = 20;
   if (first && resume > 0) qi.startTime = resume;
   return qi;
@@ -1781,9 +1786,9 @@ function castNow() {
     castSeq++;
     var base = 'http://' + ADVERTISE + ':' + PORT;
     var i0 = currentEpIndex();
-    if (i0 >= 0 && epItems.length) {
-      // folder mode → native queue: the RECEIVER advances episodes itself,
-      // so auto-next survives the browser tab being discarded entirely
+    if (i0 >= 0 && epItems.length && $('fauto').checked) {
+      // auto on + folder mode → native queue: the RECEIVER advances episodes
+      // itself, so auto-next survives the browser tab being discarded entirely
       doQueueLoad(i0, resume, base, session);
       lastCastVersion = loaded.version;
       pendingSeekTo = null;
