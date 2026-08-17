@@ -385,6 +385,37 @@ function enhanceNext() {
   });
 }
 
+// ---------- queue support: stable per-episode URLs ----------
+// The Chromecast advances a native queue by itself, so playback survives the
+// browser tab being discarded. These routes resolve episodes from the
+// remembered folders, independent of the single "current selection" state.
+let pairCache = { t: 0, key: '', items: [] };
+function currentPairing() {
+  if (!prefs.videoDir) return [];
+  const key = `${prefs.videoDir}|${prefs.subDir || ''}`;
+  const now = Date.now();
+  if (pairCache.key === key && now - pairCache.t < 10000) return pairCache.items;
+  try {
+    const sdir = prefs.subDir && fs.existsSync(prefs.subDir) ? prefs.subDir : prefs.videoDir;
+    pairCache = { t: now, key, items: pairFolder(prefs.videoDir, sdir) };
+  } catch {
+    pairCache = { t: now, key, items: [] };
+  }
+  return pairCache.items;
+}
+
+const subCache = new Map(); // sub path -> { mt, vtt, cues }
+function subsFor(p) {
+  const mt = Number(fs.statSync(p).mtimeMs);
+  const hit = subCache.get(p);
+  if (hit && hit.mt === mt) return hit;
+  const conv = convertSubtitle(p);
+  const entry = { mt, vtt: conv.vtt, cues: conv.cues };
+  subCache.set(p, entry);
+  if (subCache.size > 12) subCache.delete(subCache.keys().next().value);
+  return entry;
+}
+
 // ---------- keep Windows awake while streaming ----------
 // A muted preview tab does not hold a wake lock, so an idle-sleep timer would
 // kill the server mid-episode. While the Chromecast is actively pulling video
@@ -1009,7 +1040,7 @@ function castingLive() {
   } catch (e) { return false; }
 }
 
-function selectPair(video, sub, onDone) {
+function selectPair(video, sub, onDone, opts) {
   return fetch('/api/select', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Subcast-Key': KEY },
@@ -1018,7 +1049,9 @@ function selectPair(video, sub, onDone) {
     if (j.error) throw new Error(j.error);
     applyState(j);
     if (onDone) onDone(j);
-    if (castingLive()) castNow(); // already casting: swap the TV to the new episode immediately
+    // already casting: swap the TV — unless this select is only mirroring a
+    // queue advance the receiver made by itself
+    if (!(opts && opts.noCast) && castingLive()) castNow();
     return j;
   });
 }
@@ -1370,6 +1403,7 @@ function initCast() {
     if (e.sessionState === S.SESSION_ENDED) {
       currentTracks = null;
       currentTrackId = null;
+      queueActive = false;
       status('TV session ended (the receiver idles out after ~5 min of nothing playing) — click the cast icon to reconnect');
     } else if (e.sessionState === S.SESSION_STARTED || e.sessionState === S.SESSION_RESUMED) {
       status('Connected — press Cast to play' + (loaded && loaded.video ? ' “' + loaded.video + '”' : '') + '.');
@@ -1389,7 +1423,10 @@ function initCast() {
   });
   controller.addEventListener(cast.framework.RemotePlayerEventType.PLAYER_STATE_CHANGED, maybeAutoNext);
   controller.addEventListener(cast.framework.RemotePlayerEventType.IS_MEDIA_LOADED_CHANGED, maybeAutoNext);
-  controller.addEventListener(cast.framework.RemotePlayerEventType.MEDIA_INFO_CHANGED, maybeAutoNext);
+  controller.addEventListener(cast.framework.RemotePlayerEventType.MEDIA_INFO_CHANGED, function () {
+    onMediaInfoChanged();
+    maybeAutoNext();
+  });
   status('Ready — pick a device with the cast icon, then press Cast.');
 }
 
@@ -1437,6 +1474,7 @@ function autoAdvanceOnce(viaCast) {
 // 'IDLE' — three days of logs showed the old strict-IDLE check never fired once.
 function maybeAutoNext() {
   if (!player) return;
+  if (queueActive) return; // the receiver advances its own queue — hands off
   var st = player.playerState;
   if (st && st !== 'IDLE') return; // anything actively loaded → not ended
   if (!$('fauto').checked) return;
@@ -1627,6 +1665,64 @@ var castSeq = 0;
 var currentTrackId = null;
 var currentTracks = null; // {zh: id, ja: id, all: id} for the live load
 var lastCastVersion = null;
+var queueActive = false; // the receiver is driving a native queue — it advances itself
+
+function queueLang() {
+  var v = $('sublang').value || 'all';
+  return v;
+}
+
+function buildQueueItem(idx, base, first, resume) {
+  var it = epItems[idx];
+  var mi = new chrome.cast.media.MediaInfo(base + '/video/' + idx, 'video/mp4');
+  mi.metadata = new chrome.cast.media.GenericMediaMetadata();
+  mi.metadata.title = it.name;
+  var qi;
+  if (it.sub) {
+    mi.tracks = ['zh', 'ja', 'all'].map(function (lg, k) {
+      var tr = new chrome.cast.media.Track(k + 1, chrome.cast.media.TrackType.TEXT);
+      tr.trackContentId = base + '/subs/' + idx + '.vtt?lang=' + lg;
+      tr.trackContentType = 'text/vtt';
+      tr.subtype = chrome.cast.media.TextTrackType.SUBTITLES;
+      tr.name = lg === 'zh' ? '中文' : lg === 'ja' ? '日本語' : 'Subtitles';
+      tr.language = lg === 'ja' ? 'ja' : 'zh';
+      return tr;
+    });
+    mi.textTrackStyle = buildStyle();
+  }
+  qi = new chrome.cast.media.QueueItem(mi);
+  if (it.sub) qi.activeTrackIds = [{ zh: 1, ja: 2, all: 3 }[queueLang()]];
+  qi.autoplay = first ? true : $('fauto').checked;
+  qi.preloadTime = 20;
+  if (first && resume > 0) qi.startTime = resume;
+  return qi;
+}
+
+function doQueueLoad(i0, resume, base, session) {
+  var end = Math.min(epItems.length, i0 + 50);
+  var items = [];
+  for (var idx = i0; idx < end; idx++) items.push(buildQueueItem(idx, base, idx === i0, resume));
+  var req = new chrome.cast.media.QueueLoadRequest(items);
+  req.startIndex = 0;
+  clog('queueLoad: ' + items.length + ' items from idx ' + i0 + (resume > 0 ? ' resume=' + Math.round(resume) : '') +
+    (end < epItems.length ? ' (list capped at 50)' : ''));
+  session.getSessionObj().queueLoad(req,
+    function () {
+      queueActive = true;
+      currentTracks = { zh: 1, ja: 2, all: 3 };
+      currentTrackId = currentTracks[queueLang()] || 3;
+      subsOn = true;
+      $('subs').textContent = 'Subs: on';
+      clog('queueLoad OK');
+      status('Casting ✓ — the TV will auto-play ' + (items.length - 1) + ' more episode' + (items.length === 2 ? '' : 's') +
+        (resume > 0 ? ' (resumed at ' + fmt(resume) + ')' : ''));
+    },
+    function (e) {
+      queueActive = false;
+      clog('queueLoad FAILED: ' + JSON.stringify(e));
+      status('Queue load failed: ' + JSON.stringify(e));
+    });
+}
 
 function castNow() {
   if (!loaded) return;
@@ -1664,6 +1760,16 @@ function castNow() {
   function doLoad() {
     castSeq++;
     var base = 'http://' + ADVERTISE + ':' + PORT;
+    var i0 = currentEpIndex();
+    if (i0 >= 0 && epItems.length) {
+      // folder mode → native queue: the RECEIVER advances episodes itself,
+      // so auto-next survives the browser tab being discarded entirely
+      doQueueLoad(i0, resume, base, session);
+      lastCastVersion = loaded.version;
+      pendingSeekTo = null;
+      return;
+    }
+    queueActive = false;
     var mediaInfo = new chrome.cast.media.MediaInfo(base + '/video?v=' + loaded.version, loaded.mime || 'video/mp4');
     mediaInfo.metadata = new chrome.cast.media.GenericMediaMetadata();
     mediaInfo.metadata.title = loaded.video;
@@ -1730,6 +1836,25 @@ $('fwd').onclick = function () { if (player) pushSeek(player.currentTime + 10); 
 $('seek').oninput = function (e) {
   if (player && player.duration) pushSeek((e.target.value / 100) * player.duration);
 };
+// the receiver advanced its native queue — mirror that in the UI and server state
+function onMediaInfoChanged() {
+  try {
+    var ci = (player.mediaInfo && player.mediaInfo.contentId) || '';
+    var m = ci.match(/\\/video\\/(\\d+)$/);
+    if (!m) return;
+    queueActive = true; // a queue URL is playing (covers page reloads mid-queue)
+    var idx = Number(m[1]);
+    recoverTracks();
+    if (idx !== currentEpIndex() && epItems[idx]) {
+      clog('queue: receiver advanced to idx ' + idx);
+      selectPair(epItems[idx].video, epItems[idx].sub, function () {
+        epRowEls.forEach(function (e) { e.classList.remove('active'); });
+        if (epRowEls[idx]) { epRowEls[idx].classList.add('active'); scrollRowTop(epRowEls[idx]); }
+      }, { noCast: true }).catch(function () {});
+    }
+  } catch (e) { /* no media info yet */ }
+}
+
 // after a page reload mid-cast the track ids are lost — recover them from the live media session
 function recoverTracks() {
   var session = cast.framework.CastContext.getInstance().getCurrentSession();
@@ -1738,7 +1863,7 @@ function recoverTracks() {
   currentTracks = {};
   media.media.tracks.forEach(function (t) {
     if (t.type !== chrome.cast.media.TrackType.TEXT) return;
-    var m = (t.trackContentId || '').match(/[?&]lang=(\w+)/);
+    var m = (t.trackContentId || '').match(/[?&]lang=(\\w+)/);
     currentTracks[m ? m[1] : 'all'] = t.trackId;
   });
   var act = media.activeTrackIds || [];
@@ -1947,6 +2072,43 @@ api('/api/state').then(function (j) {
 </body></html>`;
 
 // ---------- HTTP server ----------
+function streamVideo(filePath, fileSize, mime, req, res, cors) {
+  const range = req.headers.range;
+  if (range) {
+    const m = range.match(/bytes=(\d*)-(\d*)/);
+    let start = m[1] ? parseInt(m[1], 10) : 0;
+    let end = m[2] ? parseInt(m[2], 10) : fileSize - 1;
+    end = Math.min(end, fileSize - 1);
+    if (start > end || start >= fileSize) {
+      res.writeHead(416, { 'Content-Range': `bytes */${fileSize}`, ...cors });
+      res.end();
+      return;
+    }
+    res.writeHead(206, {
+      'Content-Type': mime,
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Content-Length': end - start + 1,
+      'Accept-Ranges': 'bytes',
+      ...cors,
+    });
+    if (req.method === 'HEAD') { res.end(); return; }
+    const rs = fs.createReadStream(filePath, { start, end });
+    rs.on('data', pokeAwake); // long-lived streams keep poking while bytes flow
+    rs.pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Type': mime,
+      'Content-Length': fileSize,
+      'Accept-Ranges': 'bytes',
+      ...cors,
+    });
+    if (req.method === 'HEAD') { res.end(); return; }
+    const rs2 = fs.createReadStream(filePath);
+    rs2.on('data', pokeAwake);
+    rs2.pipe(res);
+  }
+}
+
 function authorized(req, u) {
   const a = req.socket.remoteAddress;
   if (a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1') return true;
@@ -2125,40 +2287,33 @@ const server = http.createServer((req, res) => {
     if (!state.videoPath) { res.writeHead(404, cors); res.end('no video loaded'); return; }
     pokeAwake();
     dlog(`video request ${req.headers.range || '(full)'} from ${req.socket.remoteAddress}`);
-    const range = req.headers.range;
-    if (range) {
-      const m = range.match(/bytes=(\d*)-(\d*)/);
-      let start = m[1] ? parseInt(m[1], 10) : 0;
-      let end = m[2] ? parseInt(m[2], 10) : state.videoSize - 1;
-      end = Math.min(end, state.videoSize - 1);
-      if (start > end || start >= state.videoSize) {
-        res.writeHead(416, { 'Content-Range': `bytes */${state.videoSize}`, ...cors });
-        res.end();
-        return;
-      }
-      res.writeHead(206, {
-        'Content-Type': state.videoMime,
-        'Content-Range': `bytes ${start}-${end}/${state.videoSize}`,
-        'Content-Length': end - start + 1,
-        'Accept-Ranges': 'bytes',
-        ...cors,
-      });
-      if (req.method === 'HEAD') { res.end(); return; }
-      const rs = fs.createReadStream(state.videoPath, { start, end });
-      rs.on('data', pokeAwake); // long-lived streams keep poking while bytes flow
-      rs.pipe(res);
-    } else {
-      res.writeHead(200, {
-        'Content-Type': state.videoMime,
-        'Content-Length': state.videoSize,
-        'Accept-Ranges': 'bytes',
-        ...cors,
-      });
-      if (req.method === 'HEAD') { res.end(); return; }
-      const rs2 = fs.createReadStream(state.videoPath);
-      rs2.on('data', pokeAwake);
-      rs2.pipe(res);
-    }
+    streamVideo(state.videoPath, state.videoSize, state.videoMime, req, res, cors);
+
+  } else if (/^\/video\/\d+$/.test(url)) {
+    const items = currentPairing();
+    const it = items[Number(url.slice(7))];
+    if (!it) { res.writeHead(404, cors); res.end('no such episode'); return; }
+    let vp = it.video;
+    const enh = enhancedPathFor(vp);
+    if (fs.existsSync(enh)) vp = enh;
+    let size;
+    try { size = fs.statSync(vp).size; } catch { res.writeHead(404, cors); res.end('file missing'); return; }
+    pokeAwake();
+    dlog(`queue video ${url.slice(7)} (${path.basename(vp)}) ${req.headers.range || '(full)'}`);
+    streamVideo(vp, size, MIME[path.extname(vp).toLowerCase()] || 'video/mp4', req, res, cors);
+
+  } else if (/^\/subs\/\d+\.vtt$/.test(url)) {
+    const items = currentPairing();
+    const it = items[Number(url.slice(6, -4))];
+    if (!it || !it.sub) { res.writeHead(404, cors); res.end('no subtitle'); return; }
+    let entry;
+    try { entry = subsFor(it.sub); } catch { res.writeHead(404, cors); res.end('subtitle unreadable'); return; }
+    const lang = u.searchParams.get('lang');
+    const body = (entry.cues && (lang === 'zh' || lang === 'ja'))
+      ? buildVtt(entry.cues.filter((c) => c.lang === lang))
+      : entry.vtt;
+    res.writeHead(200, { 'Content-Type': 'text/vtt; charset=utf-8', ...cors });
+    res.end(body);
 
   } else {
     res.writeHead(404, cors);
