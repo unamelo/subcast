@@ -1380,6 +1380,7 @@ function initCast() {
   controller.addEventListener(cast.framework.RemotePlayerEventType.CURRENT_TIME_CHANGED, updateSeek);
   controller.addEventListener(cast.framework.RemotePlayerEventType.DURATION_CHANGED, updateSeek);
   controller.addEventListener(cast.framework.RemotePlayerEventType.IS_PAUSED_CHANGED, function () {
+    clog('tv: isPaused=' + player.isPaused + ' state=' + player.playerState);
     syncPreview();
     reportProgress(true); // save the exact spot on pause
   });
@@ -1534,10 +1535,12 @@ function syncPreview() {
   var st = player.playerState;
   var tvPlaying = !player.isPaused && (st === 'PLAYING' || st === 'BUFFERING');
   if (tvPlaying && pv.paused) {
+    clog('sync: starting preview (tv=' + st + ')');
     pv.muted = true; // sync mode always mutes the preview — the TV carries the audio
     progPlayPause = true;
     pv.play().catch(function () { progPlayPause = false; });
   } else if (!tvPlaying && !pv.paused) {
+    clog('sync: pausing preview (tv=' + st + ' isPaused=' + player.isPaused + ')');
     progPlayPause = true;
     pv.pause();
   }
@@ -1583,15 +1586,26 @@ $('preview').addEventListener('ended', function () {
     }).catch(function () {});
   }
   if (!$('fauto').checked || castingLive()) return;
-  autoAdvanceOnce(false);
+  // if a cast session is connected, the next episode belongs on the TV even
+  // though the preview's clock finished first
+  var sAlive = false;
+  try { sAlive = Boolean(cast.framework.CastContext.getInstance().getCurrentSession()); } catch (e) { /* no cast */ }
+  autoAdvanceOnce(sAlive);
 });
+var userTouchedPreviewAt = 0;
+$('pvwrap').addEventListener('pointerdown', function () { userTouchedPreviewAt = Date.now(); });
+$('pvwrap').addEventListener('keydown', function () { userTouchedPreviewAt = Date.now(); });
+
 function fwdPlayState() {
   if ($('preview').paused) reportProgress(true); // save the exact spot when preview pauses
   if (progPlayPause) { progPlayPause = false; return; }
-  // Chrome auto-pauses muted background video on tab switch — that is not the
-  // user pausing, so never forward it to the TV
+  // browsers pause <video> for many internal reasons (tab throttling, source
+  // swaps, buffer states) — only a real recent click/keypress on the player
+  // is allowed to control the TV
   if (document.hidden) return;
+  if (Date.now() - userTouchedPreviewAt > 2000) return;
   if (syncOn && controller && player && player.duration && player.isPaused !== $('preview').paused) {
+    clog('fwd: mirroring user ' + ($('preview').paused ? 'pause' : 'play') + ' to TV');
     controller.playOrPause();
   }
 }
