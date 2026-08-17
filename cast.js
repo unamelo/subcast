@@ -999,10 +999,13 @@ function clog(m) {
 }
 
 function castingLive() {
+  // RemotePlayer, not getMediaSession(): the media session object can go stale
+  // (still says PLAYING after the media unloaded)
   try {
     var s = cast.framework.CastContext.getInstance().getCurrentSession();
-    var m = s && s.getMediaSession();
-    return Boolean(m && m.playerState !== chrome.cast.media.PlayerState.IDLE);
+    if (!s || !player || !player.isMediaLoaded) return false;
+    var st = player.playerState;
+    return st === 'PLAYING' || st === 'BUFFERING' || st === 'PAUSED';
   } catch (e) { return false; }
 }
 
@@ -1384,6 +1387,8 @@ function initCast() {
     if (castingLive()) $('fvol').value = player.volumeLevel;
   });
   controller.addEventListener(cast.framework.RemotePlayerEventType.PLAYER_STATE_CHANGED, maybeAutoNext);
+  controller.addEventListener(cast.framework.RemotePlayerEventType.IS_MEDIA_LOADED_CHANGED, maybeAutoNext);
+  controller.addEventListener(cast.framework.RemotePlayerEventType.MEDIA_INFO_CHANGED, maybeAutoNext);
   status('Ready — pick a device with the cast icon, then press Cast.');
 }
 
@@ -1395,7 +1400,6 @@ function fmt(s) {
 var lastProgressSent = 0;
 var lastKnownT = 0;
 var lastKnownD = 0;
-var advancedForSeq = -1;
 var autoNextTries = 0;
 
 // survives tab throttling: keeps trying to start the cast until the TV
@@ -1413,26 +1417,39 @@ setInterval(function () {
   try { castNow(); } catch (e) { clog('auto-next castNow threw: ' + e.message); }
 }, 8000);
 
-// natural end of an episode → cast the next one (auto toggle on the floating bar)
+// shared, debounced advance — reachable from both the cast path and the preview path
+var lastAutoAdvance = 0;
+function autoAdvanceOnce(viaCast) {
+  var now = Date.now();
+  if (now - lastAutoAdvance < 5000) return; // both paths may detect the same ending
+  var i = currentEpIndex();
+  if (i < 0 || !epItems[i + 1]) { status('episode finished — end of list'); return; }
+  lastAutoAdvance = now;
+  clog('auto-next(' + (viaCast ? 'cast' : 'preview') + '): episode finished (idx ' + i + '), advancing');
+  status('episode finished — playing the next one…');
+  if (!viaCast) autoPlayPreview = true;
+  playEpisodeAt(i + 1, viaCast);
+}
+
+// natural end of an episode → cast the next one (auto toggle on the floating bar).
+// NOTE: on real receivers playerState often goes to null (media unloaded), not
+// 'IDLE' — three days of logs showed the old strict-IDLE check never fired once.
 function maybeAutoNext() {
-  if (!player || player.playerState !== 'IDLE') return;
+  if (!player) return;
+  var st = player.playerState;
+  if (st && st !== 'IDLE') return; // anything actively loaded → not ended
   if (!$('fauto').checked) return;
-  if (advancedForSeq === castSeq) return; // once per cast
   var finished = false;
   try {
     var s = cast.framework.CastContext.getInstance().getCurrentSession();
     var m = s && s.getMediaSession();
     if (m && m.idleReason === 'FINISHED') finished = true;
-  } catch (e) { /* session gone */ }
+    if (!s) return; // session gone entirely — nothing to cast to
+  } catch (e) { return; }
   // fallback signal: we last saw the playhead at the very end
   if (!finished && lastKnownD > 0 && lastKnownT / lastKnownD > 0.95) finished = true;
   if (!finished) return;
-  var i = currentEpIndex();
-  if (i < 0 || !epItems[i + 1]) { status('episode finished — end of list'); return; }
-  advancedForSeq = castSeq;
-  clog('auto-next: episode finished (idx ' + i + '), advancing');
-  status('episode finished — playing the next one…');
-  playEpisodeAt(i + 1, true);
+  autoAdvanceOnce(true);
 }
 
 function castActive() {
@@ -1514,7 +1531,8 @@ function syncPreview() {
     progSeek = true;
     pv.currentTime = player.currentTime;
   }
-  var tvPlaying = !player.isPaused && player.playerState !== 'IDLE';
+  var st = player.playerState;
+  var tvPlaying = !player.isPaused && (st === 'PLAYING' || st === 'BUFFERING');
   if (tvPlaying && pv.paused) {
     pv.muted = true; // sync mode always mutes the preview — the TV carries the audio
     progPlayPause = true;
@@ -1565,12 +1583,7 @@ $('preview').addEventListener('ended', function () {
     }).catch(function () {});
   }
   if (!$('fauto').checked || castingLive()) return;
-  var i = currentEpIndex();
-  if (i < 0 || !epItems[i + 1]) { status('episode finished — end of list'); return; }
-  clog('auto-next(preview): advancing');
-  status('episode finished — playing the next one…');
-  autoPlayPreview = true;
-  playEpisodeAt(i + 1);
+  autoAdvanceOnce(false);
 });
 function fwdPlayState() {
   if ($('preview').paused) reportProgress(true); // save the exact spot when preview pauses
