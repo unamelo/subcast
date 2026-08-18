@@ -2356,6 +2356,17 @@ setInterval(() => {
 }, 60000);
 process.on('uncaughtException', (e) => { dlog(`UNCAUGHT: ${e.stack || e}`); console.error(e); });
 
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error(`\nPort ${PORT} is already in use — another subcast is probably running.`);
+    console.error('Find it with:  ps -eo pid,args | grep cast.js   then kill <pid>, or use --port <other>.');
+  } else {
+    console.error(e);
+  }
+  dlog(`server error: ${e.code || e.message}`);
+  process.exit(1); // never linger as a zombie that holds no port
+});
+
 server.listen(PORT, '0.0.0.0', () => {
   dlog(`server start pid=${process.pid} port=${PORT} advertise=${advertise} screenOff=${Boolean(flags.screenOff)}`);
   console.log('subcast running:');
